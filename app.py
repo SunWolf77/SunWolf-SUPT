@@ -4,17 +4,45 @@ from core_engine import compute_metrics
 st.set_page_config(page_title="SunWolf-SUPT", layout="wide")
 st.title("☀️ SunWolf-SUPT: Volcanic & Geomagnetic Dashboard")
 
-@st.cache_data(ttl=120)
-def fetch_ingv(latmin,latmax,lonmin,lonmax):
+# ===============================================================
+# LOAD SEISMIC DATA — Includes Local INGV CSV Fallback
+# ===============================================================
+@st.cache_data(ttl=600)
+def load_seismic_data():
     try:
-        url = (f"https://webservices.ingv.it/fdsnws/event/1/query?"
-               f"starttime=2025-10-01&endtime=now&latmin={latmin}&latmax={latmax}"
-               f"&lonmin={lonmin}&lonmax={lonmax}&format=text")
-        df = pd.read_csv(url, sep="|", comment="#")
-        df.columns = [c.strip().lower() for c in df.columns]
-        return df[["time","latitude","longitude","depth","mag"]].rename(columns={"mag":"md"})
-    except Exception:
-        return pd.read_csv("data/events_CF.csv")
+        df = fetch_ingv_seismic_data()
+        if df.empty:
+            raise ValueError("Empty INGV dataset")
+        st.info("Using live INGV data.")
+        return df
+
+    except Exception as e:
+        st.warning(f"INGV fetch failed (auto-handled): {e}. Loading local dataset...")
+        try:
+            # Load local INGV events CSV
+            df = pd.read_csv("events.csv")
+            df.columns = df.columns.str.strip()
+
+            # Normalize key fields for SUPT processing
+            if "time" not in df.columns:
+                if "Time" in df.columns:
+                    df["time"] = pd.to_datetime(df["Time"], errors="coerce")
+                else:
+                    df["time"] = pd.to_datetime(df.iloc[:, 0], errors="coerce")
+
+            df["magnitude"] = pd.to_numeric(df.get("MD", df.get("Magnitude", np.nan)), errors="coerce")
+            df["depth_km"] = pd.to_numeric(df.get("Depth", df.get("Depth/Km", np.nan)), errors="coerce")
+
+            # Filter last 7 days only
+            df = df.dropna(subset=["time", "magnitude", "depth_km"])
+            df = df[df["time"] >= (dt.datetime.utcnow() - dt.timedelta(days=7))]
+
+            st.success(f"Loaded local INGV dataset ({len(df)} events).")
+            return df
+
+        except Exception as err:
+            st.error(f"Local INGV fallback failed: {err}")
+            return generate_synthetic_seismic_data()
 
 @st.cache_data(ttl=10)
 def fetch_kp():
